@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+# Make the project root importable so `pytest -q` finds the `validation`
+# package regardless of how pytest is invoked.
+pythonpath = ["."]
+testpaths = ["tests"]
