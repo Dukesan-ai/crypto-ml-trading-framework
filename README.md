@@ -1,5 +1,7 @@
 # crypto-ml-trading-framework
 
+[![CI](https://github.com/Dukesan-ai/crypto-ml-trading-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/Dukesan-ai/crypto-ml-trading-framework/actions/workflows/ci.yml)
+
 **End-to-end machine-learning system for crypto perpetual futures — signal research, leakage-resistant validation, and live execution on real capital.**
 
 Built solo on the methodology of *Advances in Financial Machine Learning* (Marcos López de Prado), extended with market-microstructure alpha, regime modeling, and concept-drift–aware research.
@@ -110,10 +112,10 @@ to trade. Each demo empirically reproduces the corresponding note: vote-splittin
 (`consensus_selection`, doc 01) and the overfitting signature where losing in-sample but winning
 out-of-sample marks the strategy that generalizes (`metric_separation`, doc 02).
 
-**Tests.** `tests/test_validation.py` checks the properties the methodology depends on — purging
-removes label-overlapping training samples, train and test never intersect, CPCV reports the
-correct number of back-test paths, PSR is monotonic in the Sharpe, and the deflated Sharpe
-penalizes more trials searched. `pytest -q` → all green.
+**Tests.** A 10-test suite (`tests/test_validation.py`, run `pytest -q`) checks the properties the
+methodology depends on — purging removes label-overlapping training samples, train and test never
+intersect, CPCV reports the correct number of back-test paths, PSR is monotonic in the Sharpe, and
+the deflated Sharpe penalizes more trials searched. CI runs it on every push (badge above).
 
 ---
 
