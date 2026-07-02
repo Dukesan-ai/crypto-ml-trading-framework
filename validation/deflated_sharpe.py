@@ -1,30 +1,27 @@
 """
-Probabilistic & Deflated Sharpe Ratio (PSR / DSR)
-=================================================
+Selection-bias-aware performance statistics.
 
-Overfitting-aware Sharpe-ratio statistics, following Bailey & López de Prado,
-"The Deflated Sharpe Ratio" (2014) and *Advances in Financial Machine Learning*
-(2018), Ch. 8 & 14.
+Implements the Probabilistic and Deflated Sharpe Ratios (Bailey & López de
+Prado, 2014). These answer the question a raw Sharpe cannot: *given how many
+configurations I searched, and given short, skewed, fat-tailed returns, is this
+Sharpe distinguishable from luck?*
 
-The problem
------------
-A high in-sample Sharpe ratio means little on its own. Two effects inflate it:
+  * ``probabilistic_sharpe_ratio`` (PSR) — probability the true SR exceeds a
+    benchmark, correcting for sample length, skewness and kurtosis.
+  * ``expected_max_sharpe``            — the SR you'd expect to see as the *max*
+    of ``N`` independent trials with no real edge (the false-discovery bar).
+  * ``deflated_sharpe_ratio`` (DSR)    — PSR evaluated against that inflated
+    benchmark, i.e. deflated for the number of trials actually run.
 
-* **Short, non-normal samples.** The Sharpe estimator has variance that grows
-  with non-normality (skew/kurtosis) and shrinks with sample length ``T``.
-  *PSR* asks: given ``T``, skew and kurtosis, what is the probability the *true*
-  Sharpe exceeds a benchmark ``SR*``?
+The discipline that makes DSR honest is counting *every* configuration searched
+— not just the winner. Under-count the trials and the deflated metric is itself
+inflated. This module contains no strategy or parameters, only the statistics.
 
-* **Multiple testing / selection bias.** If you try ``N`` configurations and keep
-  the best, its Sharpe is upward-biased even with zero true edge. *DSR* deflates
-  the benchmark ``SR*`` to the **expected maximum** Sharpe under ``N`` independent
-  trials, then runs PSR against that.
-
-DSR > 0.95 ≈ "this Sharpe is unlikely to be a multiple-testing fluke." It is a
-*necessary* check, not a sufficient one — live forward performance is still the
-final judge.
-
-Generic, self-contained reference implementation (NumPy/SciPy only).
+References
+----------
+D. Bailey & M. López de Prado, "The Deflated Sharpe Ratio: Correcting for
+Selection Bias, Backtest Overfitting, and Non-Normality," *Journal of Portfolio
+Management*, 2014. Also AFML Ch. 8 (feature importance) and Ch. 11–12.
 """
 
 from __future__ import annotations
@@ -32,14 +29,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.stats import norm
 
-EULER_MASCHERONI = 0.5772156649015329
-
-
-def sharpe_ratio(returns: np.ndarray, risk_free: float = 0.0) -> float:
-    """Non-annualised Sharpe ratio of a return series (same frequency as input)."""
-    r = np.asarray(returns, dtype=float) - risk_free
-    sd = r.std(ddof=1)
-    return float(r.mean() / sd) if sd > 0 else 0.0
+_EULER_MASCHERONI = 0.5772156649015329
 
 
 def probabilistic_sharpe_ratio(
@@ -49,118 +39,102 @@ def probabilistic_sharpe_ratio(
     skew: float = 0.0,
     kurtosis: float = 3.0,
 ) -> float:
-    r"""Probabilistic Sharpe Ratio: :math:`P(\text{true SR} > \text{benchmark})`.
+    """Probability that the true Sharpe exceeds ``benchmark_sr``.
 
-    .. math::
-        \widehat{PSR}(SR^*) = \Phi\!\left(
-            \frac{(\widehat{SR}-SR^*)\sqrt{T-1}}
-                 {\sqrt{1 - \hat\gamma_3\,\widehat{SR}
-                          + \tfrac{\hat\gamma_4 - 1}{4}\,\widehat{SR}^2}}
-        \right)
+    All Sharpe ratios must be expressed in the **same frequency** as the return
+    series used for ``n_obs``, ``skew`` and ``kurtosis`` (do not annualise one
+    side only).
 
     Parameters
     ----------
-    observed_sr, benchmark_sr : float
-        Estimated Sharpe and the threshold ``SR*`` (same frequency as ``n_obs``).
-    n_obs : int
-        Number of return observations ``T``.
-    skew : float
-        Skewness :math:`\gamma_3` of the returns.
-    kurtosis : float
-        **Non-excess** kurtosis :math:`\gamma_4` (a normal distribution = 3).
+    observed_sr
+        Estimated Sharpe ratio of the strategy.
+    benchmark_sr
+        Threshold Sharpe to beat (0 for "better than nothing"; for DSR this is
+        the expected-maximum benchmark from :func:`expected_max_sharpe`).
+    n_obs
+        Number of return observations.
+    skew
+        Skewness of the returns (0 for Normal).
+    kurtosis
+        Kurtosis of the returns (3 for Normal — *not* excess kurtosis).
 
     Returns
     -------
-    float in [0, 1]
+    float
+        PSR in ``[0, 1]``. Values near 1 mean the observed SR is very unlikely
+        to be a statistical artifact of the benchmark.
     """
     if n_obs < 2:
         return float("nan")
     denom = np.sqrt(
-        max(1.0 - skew * observed_sr + (kurtosis - 1.0) / 4.0 * observed_sr ** 2, 1e-12)
+        1.0 - skew * observed_sr + (kurtosis - 1.0) / 4.0 * observed_sr ** 2
     )
+    if denom <= 0 or not np.isfinite(denom):
+        return float("nan")
     z = (observed_sr - benchmark_sr) * np.sqrt(n_obs - 1) / denom
     return float(norm.cdf(z))
 
 
-def expected_max_sharpe(sr_variance: float, n_trials: int) -> float:
-    r"""Expected maximum of ``n_trials`` i.i.d. Sharpe estimates with zero mean
-    and variance ``sr_variance`` — the deflated benchmark ``SR*_0``.
+def expected_max_sharpe(n_trials: int, sr_std: float) -> float:
+    """Expected maximum Sharpe across ``n_trials`` independent, edgeless trials.
 
-    .. math::
-        SR^*_0 = \sqrt{\widehat V}\,\Big[(1-\gamma)\,\Phi^{-1}\!\big(1-\tfrac1N\big)
-                 + \gamma\,\Phi^{-1}\!\big(1-\tfrac1N e^{-1}\big)\Big]
+    Uses the analytic approximation from Bailey & López de Prado (2014)::
 
-    where :math:`\gamma` is the Euler–Mascheroni constant and :math:`\widehat V`
-    is the variance of the Sharpe estimates across the ``N`` trials.
+        E[max SR] ≈ σ_SR · [ (1 − γ)·Z⁻¹(1 − 1/N) + γ·Z⁻¹(1 − 1/(N·e)) ]
+
+    where ``γ`` is the Euler–Mascheroni constant and ``Z⁻¹`` is the inverse
+    standard normal CDF. This is the benchmark a genuine strategy must clear to
+    be distinguishable from the best of many noise trials.
+
+    Parameters
+    ----------
+    n_trials
+        Number of configurations searched (independent trials).
+    sr_std
+        Standard deviation of the Sharpe ratios across those trials.
     """
-    if n_trials < 2 or sr_variance <= 0:
+    if n_trials < 2 or sr_std <= 0:
         return 0.0
-    g = EULER_MASCHERONI
-    q1 = norm.ppf(1.0 - 1.0 / n_trials)
-    q2 = norm.ppf(1.0 - 1.0 / (n_trials * np.e))
-    return float(np.sqrt(sr_variance) * ((1.0 - g) * q1 + g * q2))
+    z1 = norm.ppf(1.0 - 1.0 / n_trials)
+    z2 = norm.ppf(1.0 - 1.0 / (n_trials * np.e))
+    return float(sr_std * ((1.0 - _EULER_MASCHERONI) * z1 + _EULER_MASCHERONI * z2))
 
 
 def deflated_sharpe_ratio(
     observed_sr: float,
-    sr_estimates: np.ndarray,
+    sr_trials: np.ndarray,
     n_obs: int,
     skew: float = 0.0,
     kurtosis: float = 3.0,
 ) -> float:
-    """Deflated Sharpe Ratio: PSR against a benchmark deflated for multiple testing.
+    """Deflated Sharpe Ratio: PSR against the expected-maximum benchmark.
+
+    Deflates the observed Sharpe for the number of configurations searched, so
+    a high Sharpe found by trying many variants is not mistaken for edge.
 
     Parameters
     ----------
-    observed_sr : float
-        Sharpe of the *selected* (best) configuration.
-    sr_estimates : np.ndarray
-        Sharpe ratios of **all** configurations tried. Their count gives ``N``
-        and their spread gives the variance used to deflate the benchmark.
-        Pass at least the trials you searched over — under-counting inflates DSR.
-    n_obs : int
+    observed_sr
+        Sharpe of the selected (best) configuration.
+    sr_trials
+        Sharpe ratios of *all* configurations tried (including discarded ones).
+        Its length is the trial count and its dispersion sets the deflation.
+    n_obs
         Number of return observations for the selected configuration.
-    skew, kurtosis : float
-        Moments of the selected configuration's returns (kurtosis non-excess).
+    skew, kurtosis
+        Moments of the selected configuration's returns (kurtosis = 3 for Normal).
 
     Returns
     -------
-    float in [0, 1]
-        P(true SR > expected-max-under-noise). Higher = less likely a fluke.
+    float
+        DSR in ``[0, 1]``. A common decision rule accepts a strategy only if
+        DSR > 0.95.
     """
-    sr_estimates = np.asarray(sr_estimates, dtype=float)
-    n_trials = sr_estimates.size
-    sr_star = expected_max_sharpe(sr_estimates.var(ddof=1), n_trials)
-    return probabilistic_sharpe_ratio(observed_sr, sr_star, n_obs, skew, kurtosis)
-
-
-# --------------------------------------------------------------------------- #
-# Demo                                                                         #
-# --------------------------------------------------------------------------- #
-if __name__ == "__main__":
-    from scipy.stats import skew as _skew, kurtosis as _kurt
-
-    rng = np.random.default_rng(0)
-
-    # A genuinely-skilled strategy: small positive daily edge.
-    real = rng.normal(0.0008, 0.01, size=1500)
-    sr = sharpe_ratio(real)
-    g3 = float(_skew(real))
-    g4 = float(_kurt(real, fisher=False))   # non-excess
-    print(f"Observed Sharpe (per-obs)   : {sr:+.4f}  (skew {g3:+.2f}, kurt {g4:.2f})")
-    print(f"PSR vs 0                    : {probabilistic_sharpe_ratio(sr, 0.0, len(real), g3, g4):.4f}")
-
-    # Now suppose we searched 50 configs and kept the best — deflate for that.
-    trial_srs = rng.normal(0.0, 0.03, size=50)      # noise-only trial Sharpes
-    trial_srs[trial_srs.argmax()] = sr              # the one we "selected"
-    dsr = deflated_sharpe_ratio(sr, trial_srs, len(real), g3, g4)
-    print(f"DSR (deflated for 50 trials): {dsr:.4f}")
-
-    # A pure-noise 'winner' cherry-picked from 200 trials should NOT survive.
-    noise = rng.normal(0.0, 0.01, size=1500)
-    noise_sr = sharpe_ratio(noise)
-    noise_trials = rng.normal(0.0, 0.03, size=200)
-    noise_trials[noise_trials.argmax()] = noise_sr
-    print(f"\nCherry-picked noise Sharpe  : {noise_sr:+.4f}")
-    print(f"DSR (deflated for 200)      : {deflated_sharpe_ratio(noise_sr, noise_trials, len(noise)):.4f}  "
-          f"(low = correctly flagged as luck)")
+    sr_trials = np.asarray(sr_trials, dtype=float)
+    n_trials = sr_trials.size
+    if n_trials < 2:
+        raise ValueError("Need at least 2 trials to deflate; pass every config searched.")
+    sr_std = float(np.std(sr_trials, ddof=1))
+    benchmark = expected_max_sharpe(n_trials, sr_std)
+    return probabilistic_sharpe_ratio(observed_sr, benchmark, n_obs, skew, kurtosis)

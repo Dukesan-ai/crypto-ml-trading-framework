@@ -69,6 +69,54 @@ Surviving honest validation is the prerequisite, not the finish line. Running th
 
 ---
 
+## Reference implementations
+
+Clean, self-contained, dependency-light (NumPy / pandas / SciPy / scikit-learn), with
+**no strategy, parameters, or signals**. Most modules ship a runnable demo on synthetic
+data (`python <file>.py`); the core `validation/` machinery is additionally covered by a
+unit-test suite (`pytest -q`).
+
+**Textbook methods** (López de Prado / Bailey, implemented from scratch):
+
+```
+data/
+  dollar_bars.py        # information-driven (dollar) bars (AFML Ch. 2)
+labeling/
+  triple_barrier.py     # triple-barrier labeling (AFML Ch. 3)
+  meta_labeling.py      # meta-labeling + orthogonal bet sizing (AFML Ch. 3 & 10)
+validation/
+  purged_cv.py          # PurgedKFold + combinatorial purged CV (AFML Ch. 7 & 12)
+  deflated_sharpe.py    # probabilistic & deflated Sharpe (Bailey–LdP)
+```
+
+Front to back, these compose into the pipeline the system relies on: dollar bars sample tick
+data by activity → triple-barrier labels define each sample's label span → purged / combinatorial
+CV uses those spans to build leakage-free out-of-sample *paths* → deflated / probabilistic Sharpe
+judges the resulting performance **distribution**, discounted for the number of configurations
+tried. Meta-labeling sits on top, sizing the primary model's bets from orthogonal information the
+primary could not use.
+
+**Methodology tooling** (the judgment layer on top — see the notes in `docs/`):
+
+```
+selection/
+  consensus_selection.py   # cross-run consensus + a drift-vs-stochasticity diagnostic
+validation/
+  metric_separation.py     # selection-metric ≠ validation-metric, with overfitting-signature detection
+```
+
+These wrap an arbitrary selector / model as a black box — they encode *how to decide*, not what
+to trade. Each demo empirically reproduces the corresponding note: vote-splitting
+(`consensus_selection`, doc 01) and the overfitting signature where losing in-sample but winning
+out-of-sample marks the strategy that generalizes (`metric_separation`, doc 02).
+
+**Tests.** `tests/test_validation.py` checks the properties the methodology depends on — purging
+removes label-overlapping training samples, train and test never intersect, CPCV reports the
+correct number of back-test paths, PSR is monotonic in the Sharpe, and the deflated Sharpe
+penalizes more trials searched. `pytest -q` → all green.
+
+---
+
 ## Design principles
 
 - **Optimize for money, justified by method — not for statistics for its own sake.** Every choice is grounded in a specific, defensible reason (and, where possible, in the literature), then verified on out-of-sample results.
